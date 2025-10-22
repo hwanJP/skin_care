@@ -319,15 +319,21 @@ if current_file:
     with left_col:
         st.markdown("### PDF 미리보기")
         
-        try:
-            doc = fitz.open(stream=current_file.getvalue(), filetype="pdf")
-            page = doc.load_page(st.session_state.current_page - 1)
-            pix = page.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("png")
-            st.image(img_bytes, use_column_width=True)
-            doc.close()
-        except Exception as e:
-            st.error(f"PDF 렌더링 오류: {e}")
+        # ✅ PDFProcessor 메서드 사용 (과거 완성형 방식)
+        img_bytes = PDFProcessor.render_page_image(
+            current_file.getvalue(), 
+            st.session_state.current_page - 1, 
+            zoom=2.5  # ✅ 높은 zoom으로 OCR 결과 확인에 유리
+        )
+        
+        if img_bytes:
+            st.image(
+                img_bytes,
+                caption=f"{current_file.name} - 페이지 {st.session_state.current_page}/{page_count}",
+                use_column_width=True
+            )
+        else:
+            st.error("이미지 렌더링 실패")
 
     # 🔧 수정: 우측 OCR 결과 (더 넓은 공간)
     with right_col:

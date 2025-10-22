@@ -324,7 +324,7 @@ if current_file:
             page = doc.load_page(st.session_state.current_page - 1)
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("png")
-            st.image(img_bytes, use_container_width=True)
+            st.image(img_bytes, use_column_width=True)
             doc.close()
         except Exception as e:
             st.error(f"PDF 렌더링 오류: {e}")
@@ -440,26 +440,26 @@ if current_file:
         else:
             st.info("OCR 결과 데이터가 없습니다. OCR 시작 버튼을 클릭하세요.")
     
-    # ✅ 동일: 하단 통계
-    st.markdown("---")
-    st.markdown("### 전체 현황")
+    # # ✅ 동일: 하단 통계
+    # st.markdown("---")
+    # st.markdown("### 전체 현황")
     
-    total_ingredients = sum(
-        len(bundle.get('data', [])) 
-        for bundle in st.session_state.ocr_data_frames.values()
-    )
+    # total_ingredients = sum(
+    #     len(bundle.get('data', [])) 
+    #     for bundle in st.session_state.ocr_data_frames.values()
+    # )
     
-    stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
+    # stats_col1, stats_col2, stats_col3, stats_col4 = st.columns(4)
     
-    with stats_col1:
-        st.metric("처리된 페이지", processed_pages)
-    with stats_col2:
-        st.metric("추출된 원료", total_ingredients)
-    with stats_col3:
-        st.metric("저장된 레시피", len(st.session_state.saved_pages))
-    with stats_col4:
-        avg_per_page = round(total_ingredients / processed_pages, 1) if processed_pages > 0 else 0
-        st.metric("페이지당 평균", f"{avg_per_page}개")
+    # with stats_col1:
+    #     st.metric("처리된 페이지", processed_pages)
+    # with stats_col2:
+    #     st.metric("추출된 원료", total_ingredients)
+    # with stats_col3:
+    #     st.metric("저장된 레시피", len(st.session_state.saved_pages))
+    # with stats_col4:
+    #     avg_per_page = round(total_ingredients / processed_pages, 1) if processed_pages > 0 else 0
+    #     st.metric("페이지당 평균", f"{avg_per_page}개")
 
 else:
     # ✅ 동일: 초기 화면

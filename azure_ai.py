@@ -38,7 +38,11 @@ class KolmarCosmeticOCR:
         value = str(value)
         
         # 체크박스 제거
-        checkbox_words = [':selected:', ':unselected:', ':checked:', ':unchecked:']
+        checkbox_words = [
+            ':selected:', ':unselected:', ':checked:', ':unchecked:',
+            ':SELECTED:', ':UNSELECTED:', ':CHECKED:', ':UNCHECKED:',  # 대문자 추가
+            ':Selected:', ':Unselected:', ':Checked:', ':Unchecked:'   # 타이틀케이스 추가
+        ]
         for checkbox_word in checkbox_words:
             value = value.replace(checkbox_word, '')
         
@@ -486,15 +490,7 @@ class KolmarCosmeticOCR:
     
     def _find_header_rows(self, table_matrix: Dict) -> Tuple[int, int]:
         """
-        헤더 행 찾기 (예외 사례 보완)
-        
-        기존 로직: PHASE + CODE + MATERIAL이 모두 같은 행에 있어야 인식
-        개선 로직: CODE + MATERIAL이 있는 행을 찾고, PHASE는 별도로 확인
-        
-        예외 사례:
-        - 행 2: PHASE만 있음
-        - 행 3: CODE, RAW MATERIALS 있음
-        - 행 4: 실험 ID (K, L, M, N, O, P, R, S)
+        헤더 행 찾기 (개선: RAW MATERIALS가 다음 행에 있는 경우 처리)
         """
         main_header_row = None
         exp_id_row = None
@@ -508,7 +504,6 @@ class KolmarCosmeticOCR:
             row_data = table_matrix[row_idx]
             row_text = ' '.join(str(v) for v in row_data.values()).upper()
             
-            # 디버깅: 각 행 출력
             print(f"  행 {row_idx}: {row_text[:100]}...")
             
             if main_header_row is None:
@@ -516,42 +511,65 @@ class KolmarCosmeticOCR:
                 has_code = any(keyword in row_text for keyword in ['CODE', '코드', '원료코드'])
                 has_material = any(keyword in row_text for keyword in ['MATERIAL', '원료', 'RAW', '원료명'])
                 
-                # 🎯 개선: CODE + MATERIAL이 있으면 헤더로 인식 (PHASE는 선택)
-                if has_code and has_material:
-                    main_header_row = row_idx
-                    print(f"✅ 메인 헤더 행: {row_idx} (CODE + MATERIAL 발견)")
-                    
-                    # PHASE가 같은 행에 없으면 이전 행 확인
-                    if not has_phase:
-                        prev_row_idx = row_idx - 1
-                        if prev_row_idx >= 0 and prev_row_idx in table_matrix:
-                            prev_row_text = ' '.join(str(v) for v in table_matrix[prev_row_idx].values()).upper()
-                            if any(keyword in prev_row_text for keyword in ['PHASE', '상', 'STAGE']):
-                                print(f"  ℹ️ PHASE는 이전 행 {prev_row_idx}에 위치")
-                    
-                    # 다음 행이 실험 ID 행인지 확인
+                # 🔥 수정: CODE만 있어도 다음 행 확인
+                if has_code:
+                    # 다음 행에 MATERIAL이 있는지 확인
                     next_row_idx = row_idx + 1
+                    has_material_next = False
+                    
                     if next_row_idx in table_matrix:
-                        next_row_data = table_matrix[next_row_idx]
+                        next_row_text = ' '.join(str(v) for v in table_matrix[next_row_idx].values()).upper()
+                        has_material_next = any(keyword in next_row_text for keyword in ['MATERIAL', '원료', 'RAW', '원료명'])
+                    
+                    # CODE가 있고 (현재 행 또는 다음 행에 MATERIAL 있음)
+                    if has_material or has_material_next:
+                        main_header_row = row_idx
+                        print(f"✅ 메인 헤더 행: {row_idx} (CODE 발견)")
                         
-                        # 체크박스 제거 후 단일 알파벳 확인
-                        single_letters = []
-                        for col_idx, value in next_row_data.items():
-                            # 체크박스 및 줄바꿈 제거
-                            cleaned = str(value).strip()
-                            for checkbox in [':selected:', ':unselected:', ':checked:', ':unchecked:']:
-                                cleaned = cleaned.replace(checkbox, '')
-                            cleaned = cleaned.replace('\n', '').replace('\r', '').strip()
+                        if has_material_next:
+                            print(f"  ℹ️ RAW MATERIALS는 다음 행 {next_row_idx}에 위치")
+                        
+                        # 🔥 수정: 실험 ID 행 찾기 (MATERIAL 다음 행)
+                        if has_material_next:
+                            # RAW MATERIALS가 다음 행이면, 그 다음 행이 실험 ID
+                            exp_id_row = row_idx + 2
+                        else:
+                            # RAW MATERIALS가 같은 행이면, 다음 행이 실험 ID
+                            exp_id_row = row_idx + 1
+                        
+                        # 실험 ID 행 검증
+                        if exp_id_row in table_matrix:
+                            exp_row_data = table_matrix[exp_id_row]
                             
-                            if cleaned and len(cleaned) == 1 and cleaned.isalpha():
-                                single_letters.append(cleaned)
+                            single_letters = []
+                            for col_idx, value in exp_row_data.items():
+                                cleaned = self._clean_checkbox_and_newline(str(value))
+                                
+                                if cleaned and len(cleaned) == 1 and cleaned.isalpha():
+                                    single_letters.append(cleaned)
+                            
+                            print(f"  실험 ID 행({exp_id_row}) 단일 알파벳: {single_letters}")
+                            
+                            if len(single_letters) >= 3:
+                                print(f"✅ 실험 ID 행: {exp_id_row}")
+                            else:
+                                # 단일 알파벳이 부족하면 다음 행 시도
+                                exp_id_row_alt = exp_id_row + 1
+                                if exp_id_row_alt in table_matrix:
+                                    exp_row_data_alt = table_matrix[exp_id_row_alt]
+                                    single_letters_alt = []
+                                    
+                                    for col_idx, value in exp_row_data_alt.items():
+                                        cleaned = self._clean_checkbox_and_newline(str(value))
+                                        if cleaned and len(cleaned) == 1 and cleaned.isalpha():
+                                            single_letters_alt.append(cleaned)
+                                    
+                                    if len(single_letters_alt) >= 3:
+                                        exp_id_row = exp_id_row_alt
+                                        print(f"  ℹ️ 실험 ID를 다음 행 {exp_id_row}에서 발견: {single_letters_alt}")
+                                        print(f"✅ 실험 ID 행: {exp_id_row}")
                         
-                        print(f"  다음 행 {next_row_idx}의 단일 알파벳: {single_letters}")
-                        
-                        if len(single_letters) >= 3:
-                            exp_id_row = next_row_idx
-                            print(f"✅ 실험 ID 행: {next_row_idx}")
-                    break
+                        break
                 
                 # 🎯 기존 로직: PHASE + CODE + MATERIAL이 모두 있으면 (호환성 유지)
                 elif has_phase and has_code and has_material:
@@ -978,7 +996,7 @@ class KolmarCosmeticOCR:
                         raw_id = 'X'
                         print(f"  🔧 Col_{exp_col}: X 변형('{exp_row_data[exp_col]}') → 'X'로 변환")
                     
-                    if raw_id and len(raw_id) <= 3:
+                    if raw_id and len(raw_id) <= 5:
                         experiment_ids[exp_col] = raw_id
         
         print(f"\n🧪 실험 ID 매핑 (초기): {experiment_ids}")

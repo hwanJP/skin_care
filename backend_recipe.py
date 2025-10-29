@@ -16,6 +16,23 @@ from azure_ai import KolmarCosmeticOCR
 
 logger = logging.getLogger(__name__)
 
+# ============================================
+# 🆕 컬럼명 생성 함수 (C-1)
+# ============================================
+def _generate_experiment_column_name(index: int) -> str:
+    """
+    U부터 시작하는 Excel 스타일 컬럼명 생성
+    index=0 → U, index=5 → Z, index=6 → AA, index=7 → AB, ...
+    """
+    excel_index = 21 + index  # U는 21번째 알파벳 (A=1, U=21)
+    
+    result = ''
+    while excel_index > 0:
+        excel_index -= 1
+        result = chr(ord('A') + (excel_index % 26)) + result
+        excel_index //= 26
+    
+    return result
 
 def process_recipe_page(pdf_bytes: bytes, page_index: int) -> dict:
     """
@@ -77,21 +94,10 @@ def process_recipe_page(pdf_bytes: bytes, page_index: int) -> dict:
         if exp_cols and all(col.startswith('Col_') for col in exp_cols):
             logger.warning(f"⚠️ 기본 컬럼명 감지: {exp_cols}")
             
-            # 알파벳으로 변환 (A부터 시작하거나 U부터 시작)
-            # 보통 U, V, W, X, Y, Z 패턴이므로 U부터 시작
-            alphabet_start = ord('U')
+            # ✅ 새로운 컬럼명 생성 함수 사용
             new_exp_cols = []
-            
             for i, old_col in enumerate(exp_cols):
-                # U, V, W, X, Y, Z, AA, AB...
-                if i < 26:
-                    new_col = chr(alphabet_start + i)
-                else:
-                    # 26개 넘으면 AA, AB...
-                    first = chr(alphabet_start + (i // 26) - 1)
-                    second = chr(alphabet_start + (i % 26))
-                    new_col = first + second
-                
+                new_col = _generate_experiment_column_name(i)
                 new_exp_cols.append(new_col)
                 
                 # 데이터에서도 컬럼명 변경
@@ -102,14 +108,39 @@ def process_recipe_page(pdf_bytes: bytes, page_index: int) -> dict:
             exp_cols = new_exp_cols
             logger.info(f"✅ 컬럼명 자동 변환: {exp_cols}")
         
-        # 빈 리스트면 원료 데이터에서 추출
+        # ✅ 빈 리스트면 원료 데이터에서 추출 (내부 필드 필터링 H-1)
         elif not exp_cols and result['data']:
             first_ingredient = result['data'][0]
             base_cols = ['Phase', 'Code', 'Raw_Materials']
-            exp_cols = [col for col in first_ingredient.keys() if col not in base_cols]
+            internal_cols = ['_corrections', '_is_separator']  # 🆕 내부 필드
+            
+            exp_cols = [
+                col for col in first_ingredient.keys() 
+                if col not in base_cols and col not in internal_cols
+            ]
             logger.info(f"🔧 experiment_columns 자동 생성: {exp_cols}")
         
         result['experiment_columns'] = exp_cols
+        
+        # ============================================
+        # 🆕 여분 컬럼 추가 (OCR 시점에 1회만)
+        # ============================================
+        if exp_cols:
+            last_col = exp_cols[-1]
+            
+            if len(last_col) == 1:  # 단일 문자 (U~Z)
+                next_col = chr(ord(last_col) + 1)
+            else:  # AA, AB 등
+                next_col = last_col[:-1] + chr(ord(last_col[-1]) + 1)
+            
+            exp_cols_with_extra = exp_cols + [next_col]
+            
+            # 데이터에도 빈 값 추가
+            for ingredient in result['data']:
+                ingredient[next_col] = ''
+            
+            result['experiment_columns'] = exp_cols_with_extra
+            logger.info(f"✅ 여분 컬럼 추가: {next_col}")
         
         logger.info(f"✅ OCR 성공: {len(result['data'])}개 원료, 실험 컬럼: {exp_cols}")
         result['message'] = f"{len(formula_data['ingredients'])}개 원료 추출 완료"
@@ -143,8 +174,7 @@ class RecipeExcelSaver:
         if not os.path.exists(self.output_path):
             from openpyxl import Workbook
             wb = Workbook()
-            # ❌ 기존: wb.remove(wb.active)  # 이 줄이 문제!
-            # ✅ 수정: 기본 시트 그대로 두기
+            
             wb.save(self.output_path)
             wb.close()
     
@@ -159,29 +189,79 @@ class RecipeExcelSaver:
             if not data:
                 return False
             
-            # DataFrame 생성
-            df = pd.DataFrame(data)
+            sorted_data = sorted(data, key=lambda x: x.get('Phase', ''))
+            
+            # ✅ DataFrame 생성 및 _corrections 제거 (C-2)
+            df = pd.DataFrame(sorted_data)
+            
+            # _corrections 컬럼 제거 (Excel에 출력 안 함)
+            if '_corrections' in df.columns:
+                df = df.drop(columns=['_corrections'])
+            
             base_cols = ['Phase', 'Code', 'Raw_Materials']
             exp_cols = [col for col in experiment_cols if col in df.columns]
             df = df[base_cols + exp_cols]
             
             workbook = load_workbook(self.output_path)
             
-            # 시트명: 처방번호
-            sheet_name = metadata.get('formula_number', 'Recipe')
-            counter = 1
-            original_name = sheet_name
-            while sheet_name in workbook.sheetnames:
-                sheet_name = f"{original_name}_{counter}"
-                counter += 1
+            # ============================================
+            # 🆕 첫 번째 저장 시 기본 'Sheet' 삭제
+            # ============================================
+            if 'Sheet' in workbook.sheetnames and len(workbook.sheetnames) == 1:
+                default_sheet = workbook['Sheet']
+                workbook.remove(default_sheet)
+                logger.info("초기 기본 시트 삭제")
             
-            worksheet = workbook.create_sheet(title=sheet_name)
+            # ============================================
+            # 🆕 시트명 생성 로직 (처방번호 기반)
+            # ============================================
+            formula_number = metadata.get('formula_number', 'Recipe').strip()
+            saved_sheet_name = metadata.get('saved_sheet_name', None)
+            
+            if saved_sheet_name:
+                # 재편집: 기존 시트명 사용 (덮어쓰기)
+                sheet_name = saved_sheet_name
+                logger.info(f"재편집: 기존 시트명 사용 ({sheet_name})")
+            else:
+                # 첫 저장: 중복 체크 후 시트명 생성
+                sheet_name = formula_number if formula_number else 'Recipe'
+                original_name = sheet_name
+                counter = 2
+                
+                while sheet_name in workbook.sheetnames:
+                    sheet_name = f"{original_name}_{counter}"
+                    counter += 1
+                
+                logger.info(f"새 시트명 생성: {sheet_name}")
+            
+            # ============================================
+            # 시트 생성 또는 덮어쓰기
+            # ============================================
+            if sheet_name in workbook.sheetnames:
+                # 재편집: 기존 시트 위치 유지하며 덮어쓰기
+                old_index = workbook.sheetnames.index(sheet_name)
+                del workbook[sheet_name]
+                worksheet = workbook.create_sheet(title=sheet_name, index=old_index)
+                logger.info(f"시트 덮어쓰기: {sheet_name} (위치: {old_index})")
+            else:
+                # 신규: 새 시트 생성
+                worksheet = workbook.create_sheet(title=sheet_name)
+                logger.info(f"새 시트 생성: {sheet_name}")
+        
             
             # 스타일
             info_fill = PatternFill(start_color='E7E6E6', end_color='E7E6E6', fill_type='solid')
             info_font = Font(bold=True, size=10)
             header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
             header_font = Font(bold=True, color='FFFFFF', size=11)
+            separator_fill = PatternFill(start_color='E8E8E8', end_color='E8E8E8', fill_type='solid')
+            # ============================================
+            # 🆕 노란색 배경 (자동 보정된 함량 값용)
+            # ============================================
+            yellow_fill = PatternFill(start_color='FFFACD', end_color='FFFACD', fill_type='solid')
+            # 🆕 메모 행 스타일
+            memo_fill = PatternFill(start_color='FFF9E6', end_color='FFF9E6', fill_type='solid')
+            memo_font = Font(italic=True, color='999999', size=9)
             thin_border = Border(
                 left=Side(style='thin'), right=Side(style='thin'),
                 top=Side(style='thin'), bottom=Side(style='thin')
@@ -213,38 +293,115 @@ class RecipeExcelSaver:
                 cell.font = header_font
                 cell.border = thin_border
                 cell.alignment = Alignment(horizontal='center', vertical='center')
+            # ============================================
+            # 🆕 메모 행 (7행)
+            # ============================================
+            memo_row = 7
+            memo_data = metadata.get('memo', {})
             
-            # 데이터 (8행부터)
+            for col_idx, col_name in enumerate(df.columns, start=1):
+                cell = worksheet.cell(row=memo_row, column=col_idx)
+                cell.value = memo_data.get(col_name, '')
+                cell.fill = memo_fill
+                cell.font = memo_font
+                cell.border = thin_border
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+            
+            logger.info(f"메모 행 작성 완료 (7행)")
+            
+            # ============================================
+            # 🆕 데이터 (8행부터) - 스타일 적용
+            # ============================================
             data_start_row = 8
-            for df_row_idx, row_data in df.iterrows():
-                excel_row = data_start_row + df_row_idx
-                for col_idx, value in enumerate(row_data, start=1):
-                    cell = worksheet.cell(row=excel_row, column=col_idx, value=value)
-                    cell.border = thin_border
+            excel_row = data_start_row
+            previous_phase = None
             
+            for df_row_idx, ingredient in enumerate(sorted_data):
+                current_phase = ingredient.get('Phase', '')
+                
+                # Phase 변경 시 빈 행 추가
+                if previous_phase and current_phase != previous_phase:
+                    for col_idx in range(1, len(df.columns) + 1):
+                        cell = worksheet.cell(row=excel_row, column=col_idx, value='')
+                        cell.border = thin_border
+                        cell.fill = separator_fill
+                    excel_row += 1
+                
+                previous_phase = current_phase
+                
+                # ✅ 보정 플래그 가져오기 (sorted_data에서, DataFrame 아님)
+                corrections = ingredient.get('_corrections', {})
+                
+                # 데이터 행 작성
+                for col_idx, col_name in enumerate(df.columns, start=1):
+                    value = ingredient.get(col_name, '')
+                    cell = worksheet.cell(row=excel_row, column=col_idx)
+                    cell.border = thin_border
+                    
+                    # Phase
+                    if col_name == 'Phase':
+                        cell.value = value
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    # Code
+                    elif col_name == 'Code':
+                        cell.value = value
+                        cell.alignment = Alignment(horizontal='center', vertical='center')
+                    
+                    # Raw_Materials
+                    elif col_name == 'Raw_Materials':
+                        cell.value = value
+                        cell.alignment = Alignment(horizontal='left', vertical='center')
+                    
+                    # 실험 컬럼
+                    elif col_name in exp_cols:
+                        try:
+                            numeric_value = float(value)
+                            cell.value = numeric_value
+                            cell.number_format = '0.0000'
+                            cell.alignment = Alignment(horizontal='right', vertical='center')
+                        except (ValueError, TypeError):
+                            cell.value = value
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
+                        
+                        # ✅ 자동 보정된 셀만 노란색 배경
+                        if col_name in corrections:
+                            if corrections[col_name] in ['filled_zero', 'copied']:
+                                cell.fill = yellow_fill
+                
+                excel_row += 1
+            
+            # ============================================
             # 열 너비 조정
+            # ============================================
             for col_idx in range(1, len(df.columns) + 1):
                 max_length = 10
                 col_letter = get_column_letter(col_idx)
-                for row_idx in range(1, data_start_row + len(df)):
+                for row_idx in range(1, excel_row):
                     cell_value = worksheet.cell(row=row_idx, column=col_idx).value
                     if cell_value:
                         max_length = max(max_length, len(str(cell_value)))
                 worksheet.column_dimensions[col_letter].width = min(max_length + 2, 50)
             
+            # ============================================
+            # 틀 고정 (D8 - 메모 행 다음부터)
+            # ============================================
             worksheet.freeze_panes = 'D8'
             
             workbook.save(self.output_path)
             workbook.close()
             
             logger.info(f"💾 Excel 저장: {sheet_name} ({len(df)}개 원료)")
-            return True
+            # ============================================
+            # 🆕 시트명 반환 (재편집 추적용)
+            # ============================================
+            return {'success': True, 'sheet_name': sheet_name}
             
         except Exception as e:
             logger.error(f"❌ Excel 저장 실패: {e}")
             import traceback
             traceback.print_exc()
-            return False
+            return {'success': False, 'sheet_name': None}
     
     def get_excel_bytes(self):
         """Excel 바이트 반환"""

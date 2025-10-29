@@ -53,64 +53,63 @@ class KolmarCosmeticOCR:
     
     def _normalize_experiment_value(self, value: str) -> str:
         """
-        실험값 1차 정규화 (개선)
+        실험값 1차 정규화 (RULE 1~6)
         
-        규칙:
-        1. 체크박스 및 줄바꿈 제거
-        2. 특수 숫자 형식 보정 (2:0 → 2.0, :23.00 → 23.00)
-        3. X 변형 → '0'
-        4. - → '0'
-        5. 쉼표 → 점
+        단계:
+        1. 체크박스 제거
+        2. 공백 정리
+        3. 🆕 쉼표/콜론 → 점 변환
+        4. X 정규화
+        5. 소문자 → 대문자
         6. 잘못된 점 제거
+        7. '=' 제거
         """
         if not value:
             return ''
         
         value = value.strip()
         
-        # STEP 1: 체크박스 및 줄바꿈 제거 (개선)
+        # STEP 1: 체크박스 제거
         value = self._clean_checkbox_and_newline(value)
+        value = value.strip()
         
-        # STEP 2: 모든 공백 제거 (X Xx 같은 케이스 처리)
-        value = ''.join(value.split())
+        # STEP 2: TO100 특수 표현 유지
+        if 'TO' in value.upper():
+            return value
         
-        # 특수 공백 제거
-        value = value.replace('\u200b', '')
-        value = value.replace('\xa0', '')
+        # 🆕 STEP 3: 쉼표/콜론 → 점 변환 (숫자만)
+        # 8,00 → 8.00
+        # 5:00 → 5.00
+        # 2,0 → 2.0
+        if re.match(r'^\d+[,:]\d+$', value):
+            value = value.replace(',', '.').replace(':', '.')
+            print(f"    🔧 정규화: 쉼표/콜론 → 점 변환 → '{value}'")
         
-        # STEP 3: 특수 숫자 형식 보정 (개선)
-        # ':23.00' → '23.00' (앞의 콜론 제거)
-        value = value.lstrip(':')
+        # STEP 4: X 변형 정규화
+        x_variants = ['×', '✕', '✗', '*']
+        if value in x_variants:
+            value = 'X'
         
-        # '2:0' → '2.0', '5:00' → '5.00' (시간 형식 변환)
-        if re.match(r'^\d+:\d+$', value):
-            value = value.replace(':', '.')
+        # STEP 5: 소문자 x → 대문자 X
+        if value.lower() == 'x':
+            value = 'X'
         
-        # STEP 4: X 변형들 → '0'
-        value_upper = value.upper()
-        
-        # X로만 구성된 문자열 모두 처리
-        if value_upper and all(c == 'X' for c in value_upper):
-            return '0'
-        
-        # 특수문자 X 패턴
-        if value in ['×', '✕', '✗', '*']:
-            return '0'
-        
-        # STEP 5: - → '0'
-        if value == '-':
-            return '0'
-        
-        # STEP 6: 쉼표를 점으로
-        if ',' in value:
-            value = value.replace(',', '.')
+        # STEP 6: 소수점이 여러 개면 마지막만 유지
+        # 예: 1.2.3 → 1.23
+        if value.count('.') > 1:
+            parts = value.split('.')
+            value = ''.join(parts[:-1]) + '.' + parts[-1]
         
         # STEP 7: 잘못된 점 제거
+        # 10. → 10
         while value.endswith('.') and value.count('.') > 1:
             value = value[:-1]
         
         if value.endswith('.') and len(value) > 1 and value[:-1].replace('.', '').isdigit():
             value = value[:-1]
+        
+        # 🆕 STEP 8: '=' 제거
+        value = value.replace('=', '').strip()
         
         return value
     
@@ -123,13 +122,21 @@ class KolmarCosmeticOCR:
         if not value:
             return ''
         
+        original = value  # ✅ 원본 저장
         value = value.strip()
         
         # TO100, TO 100 같은 특수 표현은 유지
         if 'TO' in value.upper():
             return value
         
-        # 숫자인지 확인
+        # 🆕 유럽식 소수점 (쉼표)
+        # if re.match(r'^\d+,\d*$', value):  # 8,00 or 2,0
+        #     return value
+        
+        # 🆕 시간 형식 (콜론)
+        # if re.match(r'^\d+:\d+$', value):  # 2:0 or 5:00
+        #     return value
+        
         # 1) 순수 숫자: 10, 10.5, 0.5
         if re.match(r'^\d+\.?\d*$', value):
             return value
@@ -176,6 +183,7 @@ class KolmarCosmeticOCR:
             '1': 'I',
             '0': 'O',
             'l': 'I',  # 소문자 L도 I로
+            '8': 'B',  # 🆕 추가: 숫자 8 → 알파벳 B
         }
         
         for wrong, correct in corrections.items():
@@ -241,6 +249,11 @@ class KolmarCosmeticOCR:
         prev_phase = ''
         
         for ingredient in ingredients:
+            
+            # ============================================
+            # 🆕 추가 1: 보정 플래그 딕셔너리 초기화
+            # ============================================
+            correction_flags = {}
             # RULE 6: Phase 보정
             if 'Phase' in ingredient:
                 original_phase = ingredient['Phase']
@@ -272,6 +285,7 @@ class KolmarCosmeticOCR:
                 if idx == 0:
                     if not current_value:
                         ingredient[exp_col] = '0'
+                        correction_flags[exp_col] = 'filled_zero'
                         print(f"  RULE 1: [{code}] {exp_col} 공란 → '0'")
                 
                 # RULE 3 (고도화): 두 번째 이후 컬럼 공란 → 유효한 이전 값 복사
@@ -297,6 +311,7 @@ class KolmarCosmeticOCR:
                             if prev_value:
                                 source_col = prev_col
                                 ingredient[exp_col] = prev_value
+                                correction_flags[exp_col] = 'copied'
                                 print(f"  RULE 3: [{code}] {exp_col} 공란 → '{prev_value}' (from {source_col})")
                                 break
             
@@ -308,10 +323,12 @@ class KolmarCosmeticOCR:
                 
                 current_value = ingredient.get(exp_col, '').strip()
                 if current_value:
+                    # 🆕 주석: 이 시점에서는 이미 정규화된 값 (쉼표→점 변환 완료)
                     validated_value = self._validate_experiment_value(current_value)
                     if validated_value != current_value:
                         ingredient[exp_col] = validated_value
-        
+                        
+            ingredient['_corrections'] = correction_flags
         print("✅ 데이터 보정 룰 적용 완료")
         
         return ingredients
@@ -320,41 +337,99 @@ class KolmarCosmeticOCR:
         """
         메타데이터 테이블에서 정보 추출
         
-        테이블 0 구조:
-        행 0: FORMULA NO | WE1756 | ORIGIN | WE0717
-        행 1: 제품 명 | 페이스 트리트먼트... | DATE / | NO /
-        행 2: 처방특성 | 겔랑 아베이...
+        개선사항:
+        - Formula No 라벨의 바로 다음 셀만 확인
+        - ORIGINS 등 다른 라벨의 값 제외
+        - 제품명에서 'No /', 'Date /' 제거
         """
         
+        print(f"\n🔍 메타 테이블 추출 시도: {field_type}")
+        print(f"  테이블 크기: {table.row_count}행 x {table.column_count}열")
+        
+        # 디버깅: 모든 셀 내용 출력
+        print(f"  테이블 내용:")
+        cells_by_row = {}
+        for cell in table.cells:
+            row_idx = cell.row_index
+            if row_idx not in cells_by_row:
+                cells_by_row[row_idx] = []
+            cells_by_row[row_idx].append((cell.column_index, cell.content.strip()))
+        
+        for row_idx in sorted(cells_by_row.keys()):
+            row_content = ' | '.join([f"[{col}]{content[:30]}" for col, content in sorted(cells_by_row[row_idx])])
+            print(f"    행 {row_idx}: {row_content}")
+        
+        # 추출 로직
         for cell in table.cells:
             content = cell.content.strip()
+            content_upper = content.upper().replace(' ', '')
             
             if field_type == 'formula_number':
-                # "FORMULA NO" 또는 "처방번호" 옆의 값 찾기
-                if 'FORMULA NO' in content.upper() or '처방번호' in content:
-                    # 같은 행의 다음 셀 찾기
+                # 🔧 수정: Formula No/Formelle No 라벨을 정확히 찾기
+                if ('FORMULANO' in content_upper or 
+                    'FORMELLENO' in content_upper or  # OCR 오류
+                    '처방번호' in content):
+                    
+                    print(f"    라벨 발견: '{content}' (행{cell.row_index}, 열{cell.column_index})")
+                    
+                    # 🔧 핵심: 바로 다음 셀(column_index + 1)만 확인
                     for next_cell in table.cells:
-                        if next_cell.row_index == cell.row_index and next_cell.column_index == cell.column_index + 1:
-                            # "WE1756 ORIGIN" → "WE1756"만 추출
+                        if (next_cell.row_index == cell.row_index and 
+                            next_cell.column_index == cell.column_index + 1):
+                            
                             value = next_cell.content.strip()
-                            return value.split()[0] if value else ''
+                            match = re.search(r'WE\d{4}', value.upper())
+                            if match:
+                                result = match.group()
+                                print(f"  ✅ 문서번호 발견: '{result}' (셀: 행{cell.row_index}, 열{next_cell.column_index})")
+                                return result
             
             elif field_type == 'product_name':
-                # "제품 명" 옆의 값
+                # 제품 명 찾기
                 if '제품' in content and '명' in content:
-                    for next_cell in table.cells:
-                        if next_cell.row_index == cell.row_index and next_cell.column_index == cell.column_index + 1:
-                            value = next_cell.content.strip()
-                            # "폴리올 고함량 제형 (페이스...) DATE /" → DATE 앞까지만
-                            return value.split('DATE')[0].strip() if value else ''
+                    print(f"    라벨 발견: '{content}' (행{cell.row_index}, 열{cell.column_index})")
+                    
+                    # 같은 행의 다음 셀들 병합
+                    values = []
+                    for next_cell in sorted([c for c in table.cells 
+                                        if c.row_index == cell.row_index and c.column_index > cell.column_index], 
+                                        key=lambda x: x.column_index):
+                        next_value = next_cell.content.strip()
+                        
+                        # 🔧 수정: 불필요한 텍스트 필터링 강화
+                        if next_value and next_value not in ['DATE', 'Date', 'NO', 'No', '/', '']:
+                            # Date, No 단어 제거
+                            next_value = re.sub(r'\s*Date\s*/?\s*', '', next_value, flags=re.IGNORECASE)
+                            next_value = re.sub(r'\s*No\s*/?\s*$', '', next_value, flags=re.IGNORECASE)
+                            next_value = next_value.strip()
+                            
+                            if next_value:
+                                values.append(next_value)
+                    
+                    if values:
+                        result = ' '.join(values)
+                        print(f"  ✅ 제품명 발견: '{result}' (행{cell.row_index})")
+                        return result
             
             elif field_type == 'characteristics':
-                # "처방특성" 옆의 값
-                if '처방특성' in content:
-                    for next_cell in table.cells:
-                        if next_cell.row_index == cell.row_index and next_cell.column_index == cell.column_index + 1:
-                            return next_cell.content.strip()
+                if '처방특성' in content or '특성' in content:
+                    print(f"    라벨 발견: '{content}' (행{cell.row_index}, 열{cell.column_index})")
+                    
+                    # 같은 행의 다음 셀들 병합
+                    values = []
+                    for next_cell in sorted([c for c in table.cells 
+                                        if c.row_index == cell.row_index and c.column_index > cell.column_index], 
+                                        key=lambda x: x.column_index):
+                        next_value = next_cell.content.strip()
+                        if next_value:
+                            values.append(next_value)
+                    
+                    if values:
+                        result = ' '.join(values)
+                        print(f"  ✅ 처방특성 발견: '{result}' (행{cell.row_index})")
+                        return result
         
+        print(f"  ⚠️ {field_type} 추출 실패")
         return ''
 
     def extract_cosmetic_formula_table(self, image_path: str) -> Dict:
@@ -368,39 +443,70 @@ class KolmarCosmeticOCR:
         poller = self.client.begin_analyze_document("prebuilt-layout", document=image_data)
         result = poller.result()
         
-        # 🔍 디버그: 테이블 수 확인
         print(f"📋 감지된 테이블 수: {len(result.tables)}")
         for idx, tbl in enumerate(result.tables):
             print(f"  테이블 {idx}: {tbl.row_count}행 x {tbl.column_count}열")
         
-        # 🔥 수정: 메타데이터 추출 (작은 테이블에서)
+        # ========== 메타데이터 추출: 3단계 전략 ==========
+        document_info = {
+            'formula_number': '',
+            'product_name': '',
+            'characteristics': ''
+        }
+        
         if len(result.tables) >= 2:
-            # 테이블 크기 비교 (셀 수 기준)
             table_sizes = [(idx, tbl.row_count * tbl.column_count) for idx, tbl in enumerate(result.tables)]
-            table_sizes.sort(key=lambda x: x[1])  # 크기순 정렬
+            table_sizes.sort(key=lambda x: x[1])
             
-            small_idx = table_sizes[0][0]  # 가장 작은 테이블
-            large_idx = table_sizes[-1][0]  # 가장 큰 테이블
+            small_idx = table_sizes[0][0]
+            large_idx = table_sizes[-1][0]
             
             print(f"  → 작은 테이블(메타): 테이블 {small_idx}")
             print(f"  → 큰 테이블(제형): 테이블 {large_idx}")
             
+            # 1단계: 작은 테이블(메타)에서 추출
             meta_table = result.tables[small_idx]
             formula_number = self._extract_from_meta_table(meta_table, 'formula_number')
             product_name = self._extract_from_meta_table(meta_table, 'product_name')
             characteristics = self._extract_from_meta_table(meta_table, 'characteristics')
             
-            document_info = {
-                'formula_number': formula_number,
-                'product_name': product_name,
-                'characteristics': characteristics
-            }
+            document_info['formula_number'] = formula_number
+            document_info['product_name'] = product_name
+            document_info['characteristics'] = characteristics
             
-            # 제형 데이터는 큰 테이블
+            # 2단계: 제형 테이블 상단에서 추출 (부족한 정보 보완)
+            if not document_info['product_name'] or not document_info['characteristics']:
+                print(f"\n⚠️ 메타 테이블에서 일부 정보 추출 실패, 제형 테이블 상단 확인")
+                table = result.tables[large_idx]
+                formula_header_info = self._extract_from_formula_table_header(table)
+                
+                if not document_info['formula_number']:
+                    document_info['formula_number'] = formula_header_info['formula_number']
+                if not document_info['product_name']:
+                    document_info['product_name'] = formula_header_info['product_name']
+                    print(f"  🔄 제품명 (제형 테이블): '{document_info['product_name']}'")
+                if not document_info['characteristics']:
+                    document_info['characteristics'] = formula_header_info['characteristics']
+                    print(f"  🔄 처방특성 (제형 테이블): '{document_info['characteristics']}'")
+            
+            # 3단계: 전체 텍스트 fallback
+            if not document_info['formula_number'] or not document_info['product_name']:
+                print(f"\n⚠️ 여전히 정보 부족, 전체 텍스트에서 재시도")
+                full_text = result.content
+                fallback_info = self._extract_document_info(full_text)
+                
+                if not document_info['formula_number']:
+                    document_info['formula_number'] = fallback_info.get('formula_number', 'Unknown')
+                    print(f"  🔄 문서번호 (전체 텍스트): '{document_info['formula_number']}'")
+                
+                if not document_info['product_name']:
+                    document_info['product_name'] = fallback_info.get('product_name', '제품명 미확인')
+                    print(f"  🔄 제품명 (전체 텍스트): '{document_info['product_name']}'")
+            
             table = result.tables[large_idx]
             
         else:
-            # 테이블 1개면 기존 방식
+            # 테이블 1개면 전체 텍스트에서 추출
             full_text = result.content
             document_info = self._extract_document_info(full_text)
             table = result.tables[0]
@@ -423,6 +529,74 @@ class KolmarCosmeticOCR:
         
         return formula_data
     
+    def _extract_from_formula_table_header(self, table) -> Dict:
+        """
+        제형 테이블 상단에서 메타데이터 추출
+        
+        많은 경우 제형 테이블의 처음 2-3행에 제품명, 처방특성 등이 있음
+        """
+        print(f"\n🔍 제형 테이블 상단에서 메타데이터 추출 시도")
+        
+        info = {
+            'formula_number': '',
+            'product_name': '',
+            'characteristics': ''
+        }
+        
+        # 처음 5행만 확인
+        cells_by_row = {}
+        for cell in table.cells:
+            if cell.row_index < 5:  # 처음 5행만
+                row_idx = cell.row_index
+                if row_idx not in cells_by_row:
+                    cells_by_row[row_idx] = {}
+                cells_by_row[row_idx][cell.column_index] = cell.content.strip()
+        
+        # 각 행 확인
+        for row_idx in sorted(cells_by_row.keys()):
+            row_data = cells_by_row[row_idx]
+            
+            for col_idx, content in row_data.items():
+                content_lower = content.lower()
+                
+                # 제품명 찾기
+                if '제품' in content and '명' in content:
+                    # 같은 행의 다음 셀들 병합
+                    values = []
+                    for next_col in sorted([c for c in row_data.keys() if c > col_idx]):
+                        next_value = row_data[next_col]
+                        if next_value and next_value not in ['DATE', 'Date', 'NO', '/', '']:
+                            if 'DATE' in next_value or 'Date' in next_value:
+                                next_value = next_value.split('DATE')[0].split('Date')[0].strip()
+                            if next_value:
+                                values.append(next_value)
+                    
+                    if values:
+                        info['product_name'] = ' '.join(values)
+                        print(f"  ✅ 제품명 발견: '{info['product_name']}' (행{row_idx})")
+                
+                # 처방특성 찾기
+                if '처방특성' in content or ('처방' in content and '특성' in content):
+                    # 같은 행의 다음 셀들 병합
+                    values = []
+                    for next_col in sorted([c for c in row_data.keys() if c > col_idx]):
+                        next_value = row_data[next_col]
+                        if next_value:
+                            values.append(next_value)
+                    
+                    if values:
+                        info['characteristics'] = ' '.join(values)
+                        print(f"  ✅ 처방특성 발견: '{info['characteristics']}' (행{row_idx})")
+                
+                # Formula No 찾기
+                if 'formula' in content_lower or 'WE' in content.upper():
+                    match = re.search(r'WE\d{4}', content.upper())
+                    if match:
+                        info['formula_number'] = match.group()
+                        print(f"  ✅ 문서번호 발견: '{info['formula_number']}' (행{row_idx})")
+        
+        return info
+
     def _extract_raw_table(self, table) -> pd.DataFrame:
         """원본 테이블 추출"""
         table_matrix = {}
@@ -458,31 +632,44 @@ class KolmarCosmeticOCR:
         return df
     
     def _extract_document_info(self, text: str) -> Dict:
-        """문서 정보 추출"""
+        """문서 정보 추출 (개선)"""
         info = {}
         
-        formula_match = re.search(r'WE\d{4}', text)
+        # 🔧 문서번호: WE + 4자리 숫자
+        formula_match = re.search(r'WE\d{4}', text.upper())
         info['formula_number'] = formula_match.group() if formula_match else 'Unknown'
         
+        # Origin (부차적 정보)
         origin_match = re.search(r'Origin[:\s]*([A-Z0-9]+)', text, re.IGNORECASE)
         info['origin'] = origin_match.group(1) if origin_match else ''
         
+        # 🔧 제품명: 여러 패턴 시도
         product_patterns = [
-            r'페이스 [가-힣\s]+',
-            r'제품명[:\s]*([가-힣\s\w]+)',
-            r'[가-힣]{2,}\s+[가-힣]{2,}'
+            r'제품\s*명[:\s]*([가-힣\s\w\(\)]+?)(?:DATE|Date|ORIGIN|Origin|\n|$)',  # 제품 명: XXX
+            r'(?:페이스|에센스|세럼|크림|로션|토너)[가-힣\s\w\(\)]+제형',  # XXX 제형
+            r'[가-힣]{2,}\s+[가-힣]{2,}\s+제형',  # 두 단어 이상 + 제형
         ]
+        
         for pattern in product_patterns:
             product_match = re.search(pattern, text)
             if product_match:
-                info['product_name'] = product_match.group().strip()
-                if '제품명' in info['product_name']:
-                    info['product_name'] = info['product_name'].split('제품명')[-1].strip()
-                break
+                product_name = product_match.group(1) if product_match.lastindex else product_match.group()
+                product_name = product_name.strip()
+                
+                # 불필요한 단어 제거
+                for remove_word in ['DATE', 'Date', 'ORIGIN', 'Origin', '제품명', '제품 명']:
+                    product_name = product_name.replace(remove_word, '')
+                
+                product_name = product_name.strip()
+                
+                if len(product_name) > 3:  # 최소 길이 체크
+                    info['product_name'] = product_name
+                    break
         
         if 'product_name' not in info:
             info['product_name'] = '제품명 미확인'
         
+        # 처방특성
         characteristics_match = re.search(r'처방특성[:\s]*([가-힣\s\w\(\)]+)', text)
         info['characteristics'] = characteristics_match.group(1).strip() if characteristics_match else ''
         
@@ -490,7 +677,7 @@ class KolmarCosmeticOCR:
     
     def _find_header_rows(self, table_matrix: Dict) -> Tuple[int, int]:
         """
-        헤더 행 찾기 (개선: RAW MATERIALS가 다음 행에 있는 경우 처리)
+        헤더 행 찾기 (개선: RAW MATERIALS가 이전/다음 행에 있는 경우 모두 처리)
         """
         main_header_row = None
         exp_id_row = None
@@ -511,26 +698,37 @@ class KolmarCosmeticOCR:
                 has_code = any(keyword in row_text for keyword in ['CODE', '코드', '원료코드'])
                 has_material = any(keyword in row_text for keyword in ['MATERIAL', '원료', 'RAW', '원료명'])
                 
-                # 🔥 수정: CODE만 있어도 다음 행 확인
+                # 🔥 수정: CODE만 있어도 이전/다음 행 확인
                 if has_code:
-                    # 다음 행에 MATERIAL이 있는지 확인
+                    # 🆕 이전 행에 MATERIAL 확인
+                    prev_row_idx = row_idx - 1
+                    has_material_prev = False
+                    if prev_row_idx >= 0 and prev_row_idx in table_matrix:
+                        prev_row_text = ' '.join(str(v) for v in table_matrix[prev_row_idx].values()).upper()
+                        has_material_prev = any(keyword in prev_row_text for keyword in ['MATERIAL', '원료', 'RAW', '원료명'])
+                    
+                    # 다음 행에 MATERIAL 확인
                     next_row_idx = row_idx + 1
                     has_material_next = False
-                    
                     if next_row_idx in table_matrix:
                         next_row_text = ' '.join(str(v) for v in table_matrix[next_row_idx].values()).upper()
                         has_material_next = any(keyword in next_row_text for keyword in ['MATERIAL', '원료', 'RAW', '원료명'])
                     
-                    # CODE가 있고 (현재 행 또는 다음 행에 MATERIAL 있음)
-                    if has_material or has_material_next:
+                    # 🔧 수정: 현재/이전/다음 행 중 하나라도 MATERIAL 있으면 OK
+                    if has_material or has_material_prev or has_material_next:
                         main_header_row = row_idx
                         print(f"✅ 메인 헤더 행: {row_idx} (CODE 발견)")
                         
-                        if has_material_next:
+                        if has_material_prev:
+                            print(f"  ℹ️ RAW MATERIALS는 이전 행 {prev_row_idx}에 위치")
+                        elif has_material_next:
                             print(f"  ℹ️ RAW MATERIALS는 다음 행 {next_row_idx}에 위치")
                         
-                        # 🔥 수정: 실험 ID 행 찾기 (MATERIAL 다음 행)
-                        if has_material_next:
+                        # 🔥 수정: 실험 ID 행 찾기 (MATERIAL 위치에 따라 분기)
+                        if has_material_prev:
+                            # RAW MATERIALS가 이전 행이면, CODE 다음 행이 실험 ID
+                            exp_id_row = row_idx + 1
+                        elif has_material_next:
                             # RAW MATERIALS가 다음 행이면, 그 다음 행이 실험 ID
                             exp_id_row = row_idx + 2
                         else:
@@ -544,6 +742,8 @@ class KolmarCosmeticOCR:
                             single_letters = []
                             for col_idx, value in exp_row_data.items():
                                 cleaned = self._clean_checkbox_and_newline(str(value))
+                                # 🆕 특수문자 제거 (H- → H)
+                                cleaned = cleaned.replace('-', '').replace('_', '').strip()
                                 
                                 if cleaned and len(cleaned) == 1 and cleaned.isalpha():
                                     single_letters.append(cleaned)
@@ -561,6 +761,7 @@ class KolmarCosmeticOCR:
                                     
                                     for col_idx, value in exp_row_data_alt.items():
                                         cleaned = self._clean_checkbox_and_newline(str(value))
+                                        cleaned = cleaned.replace('-', '').replace('_', '').strip()
                                         if cleaned and len(cleaned) == 1 and cleaned.isalpha():
                                             single_letters_alt.append(cleaned)
                                     
@@ -609,6 +810,15 @@ class KolmarCosmeticOCR:
             print("\n⚠️ 첫 번째 행을 헤더로 사용합니다.")
             main_header_row = 0
             exp_id_row = 1 if 1 in table_matrix else None
+        
+        # ✅ 추가: 실험 ID 행 전체 출력 (디버깅용)
+        if exp_id_row is not None and exp_id_row in table_matrix:
+            print(f"\n📋 실험 ID 행({exp_id_row}) 전체 데이터:")
+            exp_row_data = table_matrix[exp_id_row]
+            for col_idx in sorted(exp_row_data.keys()):
+                value = exp_row_data[col_idx]
+                cleaned = self._clean_checkbox_and_newline(value)
+                print(f"  Col_{col_idx}: '{value}' → '{cleaned}'")
         
         return main_header_row, exp_id_row
     
@@ -668,7 +878,7 @@ class KolmarCosmeticOCR:
         
         return table_matrix
     
-    def _identify_columns(self, table_matrix: Dict, header_row: int) -> Dict:
+    def _identify_columns(self, table_matrix: Dict, header_row: int, exp_id_row: int = None) -> Dict:
         """컬럼 식별 (실험 컬럼 조건 강화 버전)"""
         if header_row not in table_matrix:
             print(f"⚠️ 헤더 행 {header_row}이 존재하지 않습니다.")
@@ -679,7 +889,11 @@ class KolmarCosmeticOCR:
         code_col = None
         name_col = None
         
-        print(f"\n🔍 컬럼 식별 중 (헤더 행 {header_row}):")
+        # 🔧 수정: exp_id_row를 파라미터로 받음
+        if exp_id_row is None:
+            exp_id_row = header_row + 1
+        
+        print(f"\n🔍 컬럼 식별 중 (헤더 행 {header_row}, 실험 ID 행 {exp_id_row}):")
         
         # 현재 행에서 컬럼 찾기
         for col_idx, value in row_data.items():
@@ -740,8 +954,9 @@ class KolmarCosmeticOCR:
                 if row_max > max_col:
                     max_col = row_max
         
-        # 🔥 실험 ID 행 번호 (헤더 바로 다음)
-        exp_id_row = header_row + 1
+        # 🔥🔥🔥 핵심 수정: 이 줄을 삭제! 🔥🔥🔥
+        # exp_id_row = header_row + 1  # ❌ 삭제
+        # exp_id_row는 이미 파라미터로 받았으므로 재할당 금지!
                     
         experiment_cols = []
         
@@ -759,24 +974,47 @@ class KolmarCosmeticOCR:
                 
             print(f"\n  Col_{col_idx} 확인 중...")
             
+            # ✅ 추가: 실제 데이터 샘플 출력 (처음 5개)
+            print(f"    === 실제 데이터 샘플 ===")
+            sample_count = 0
+            for check_row_idx in range(exp_id_row, min(header_row + 20, len(table_matrix))):
+                if check_row_idx in table_matrix and col_idx in table_matrix[check_row_idx]:
+                    cell_value = str(table_matrix[check_row_idx][col_idx]).strip()
+                    if cell_value and cell_value not in ['nan', 'None', '']:
+                        print(f"      행 {check_row_idx}: '{cell_value[:30]}'")
+                        sample_count += 1
+                        if sample_count >= 5:
+                            break
+                
             # ========== 🔥 1단계: 실험 ID 행에 단일 알파벳 확인 ==========
             has_experiment_id = False
             experiment_id_value = None
-            
+
             if exp_id_row in table_matrix and col_idx in table_matrix[exp_id_row]:
                 id_value = self._clean_checkbox_and_newline(str(table_matrix[exp_id_row][col_idx]))
                 print(f"    실험 ID 행({exp_id_row}) 값: '{id_value}'")
                 
-                # 단일 알파벳인지 확인 (체크박스 제거 후)
+                # 🆕 정규화: 모든 특수문자 제거
                 id_value_clean = id_value.strip()
+                # 🔥 추가: 콜론, 세미콜론, 점 등 모든 특수문자 제거
+                import re
+                id_value_clean = re.sub(r'[^A-Za-z0-9]', '', id_value_clean)
+                
+                # 🆕 숫자 → 알파벳 변환 (1 → I)
+                if id_value_clean == '1':
+                    id_value_clean = 'I'
+                    print(f"    🔧 숫자 ID 보정: '1' → 'I'")
+                elif id_value_clean == '0':
+                    # 이전 컬럼 확인하여 O 또는 D 결정
+                    pass
+                
+                # 단일 알파벳인지 확인
                 if len(id_value_clean) == 1 and id_value_clean.isalpha():
                     has_experiment_id = True
                     experiment_id_value = id_value_clean.upper()
-                    print(f"    ✅ 실험 ID '{experiment_id_value}' 발견!")
+                    print(f"    ✅ 실험 ID '{experiment_id_value}' 발견! (원본: '{id_value}')")
                 else:
-                    print(f"    ❌ 단일 알파벳 아님 (값: '{id_value_clean}')")
-            else:
-                print(f"    ❌ 실험 ID 행에 데이터 없음")
+                    print(f"    ❌ 단일 알파벳 아님 (정규화 후: '{id_value_clean}')")
             
             # ========== 🔥 2단계: 데이터 존재 여부 확인 ==========
             has_data = False
@@ -805,20 +1043,85 @@ class KolmarCosmeticOCR:
             print(f"    → has_data={has_data}, data_count={data_count}, found_rows={found_rows[:3]}...")
             
             # ========== 🔥 3단계: 조건 판단 ==========
-            # 실험 ID가 있고 데이터가 있으면 추가
+            # 기존 조건 완화: name_col 바로 다음 컬럼도 실험 컬럼 가능성 고려
             if has_experiment_id and has_data and data_count > 0:
                 experiment_cols.append(col_idx)
                 print(f"    ✅ 실험 컬럼으로 추가! (ID: {experiment_id_value})")
-            # 실험 ID는 없지만 데이터가 충분히 많으면 추가 (단, name_col 바로 다음은 제외)
-            elif not has_experiment_id and data_count >= 5 and col_idx > name_col + 1:
-                experiment_cols.append(col_idx)
-                print(f"    ✅ 실험 컬럼으로 추가! (ID 없지만 데이터 충분: {data_count}개, 추론 예정)")
+            # 🆕 수정: name_col + 1 컬럼도 포함 (>= 대신 >)
+            elif not has_experiment_id and data_count >= 5 and col_idx >= name_col + 1:  # 🔧 수정
+                # 🆕 추가 검증: 알파벳 순서 확인
+                # 이전/다음 컬럼과 순서가 맞으면 실험 컬럼으로 추가
+                should_add = False
+                
+                # 이미 추가된 실험 컬럼이 있는 경우
+                if experiment_cols:
+                    last_exp_col = experiment_cols[-1]
+                    # 연속된 컬럼이면 실험 컬럼일 가능성 높음
+                    if col_idx == last_exp_col + 1:
+                        should_add = True
+                        print(f"    💡 이전 실험 컬럼과 연속: Col_{last_exp_col} → Col_{col_idx}")
+                
+                if should_add:
+                    experiment_cols.append(col_idx)
+                    print(f"    ✅ 실험 컬럼으로 추가! (ID 없지만 데이터 충분: {data_count}개)")
             else:
-                print(f"    ❌ 제외 (ID: {has_experiment_id}, 데이터: {data_count}개)")
+                # ✅ 추가: 제외 상세 이유
+                print(f"    ❌ 제외됨")
+                print(f"      - has_experiment_id: {has_experiment_id}")
+                print(f"      - data_count: {data_count}")
+                print(f"      - col_idx > name_col + 1: {col_idx} > {name_col + 1} = {col_idx > name_col + 1}")
+                if not has_experiment_id and data_count < 5:
+                    print(f"      → 사유: 실험 ID 없고 데이터 부족 ({data_count} < 5)")
+                elif not has_experiment_id and col_idx <= name_col + 1:
+                    print(f"      → 사유: 원료명 영역으로 추정")
         
         experiment_cols.sort()
         print(f"\n🧪 실험 컬럼 인덱스: {experiment_cols}")
         
+        
+        # 🆕 연속성 확인: 첫 컬럼 이전 + 중간 gap
+        if len(experiment_cols) >= 1:
+            print(f"\n🔍 실험 컬럼 연속성 확인 중...")
+            missing_cols = []
+            
+            first_exp_col = experiment_cols[0]
+            
+            # 🆕 1단계: 첫 번째 실험 컬럼 이전 확인 (name_col 다음부터)
+            if first_exp_col > name_col + 1:
+                print(f"  💡 첫 실험 컬럼(Col_{first_exp_col}) 이전 확인")
+                
+                for check_col in range(name_col + 1, first_exp_col):
+                    # 실험 ID 행에 값이 있는지 확인
+                    if exp_id_row in table_matrix and check_col in table_matrix[exp_id_row]:
+                        id_value = self._clean_checkbox_and_newline(str(table_matrix[exp_id_row][check_col]))
+                        # 특수문자 제거
+                        import re
+                        id_value_clean = re.sub(r'[^A-Za-z0-9]', '', id_value.strip())
+                        
+                        # 빈 문자열이 아니면 후보
+                        if id_value_clean or check_col == first_exp_col - 1:
+                            print(f"    ⚠️ Col_{check_col} 누락 가능성 (ID: '{id_value}' → '{id_value_clean}')")
+                            missing_cols.append(check_col)
+            
+            # 🆕 2단계: 기존 실험 컬럼 사이 gap 확인
+            for i in range(len(experiment_cols) - 1):
+                curr_col = experiment_cols[i]
+                next_col = experiment_cols[i + 1]
+                
+                if next_col - curr_col > 1:
+                    for missing_col in range(curr_col + 1, next_col):
+                        print(f"    ⚠️ Col_{curr_col}과 Col_{next_col} 사이에 Col_{missing_col} 누락")
+                        missing_cols.append(missing_col)
+            
+            # 누락 컬럼 추가
+            if missing_cols:
+                print(f"  🔧 누락 컬럼 추가: {missing_cols}")
+                experiment_cols.extend(missing_cols)
+                experiment_cols.sort()
+                print(f"  ✅ 확장된 실험 컬럼: {experiment_cols}")
+
+        print(f"\n🧪 최종 실험 컬럼 인덱스: {experiment_cols}")
+
         return {
             'phase_col': phase_col,
             'code_col': code_col,
@@ -831,6 +1134,11 @@ class KolmarCosmeticOCR:
         누락된 실험 ID를 주변 알파벳으로 추론
         
         예: P(col_9) - ?(col_10) - R(col_11) → Q로 추론
+        
+        개선사항:
+        - 숫자 ID 보정 (0→D/O, 1→I)
+        - UnboundLocalError 수정
+        - 디버깅 로그 추가
         """
         import string
         
@@ -840,56 +1148,103 @@ class KolmarCosmeticOCR:
         
         print(f"\n🔍 누락된 실험 ID 추론 중...")
         
+        # ✅ 추론 전 상태 출력
+        print(f"  추론 전 매핑:")
+        for col in sorted_cols:
+            exp_id = experiment_ids.get(col, None)
+            print(f"    Col_{col}: {exp_id if exp_id else '(없음)'}")
+        
+        # ========== 1단계: 숫자 ID 보정 ==========
+        for col in sorted_cols:
+            exp_id = result.get(col)
+            
+            # 🆕 'H-' 같은 경우 정규화
+            if exp_id and '-' in exp_id:
+                cleaned = exp_id.replace('-', '').replace('_', '').strip()
+                if len(cleaned) == 1 and cleaned.isalpha():
+                    result[col] = cleaned
+                    print(f"  🔧 특수문자 제거: Col_{col} '{exp_id}' → '{cleaned}'")
+                    exp_id = cleaned
+            
+            # 기존 숫자 ID 보정
+            if exp_id == '0':
+                idx = sorted_cols.index(col)
+                if idx > 0:
+                    prev_col = sorted_cols[idx-1]
+                    prev_id = result.get(prev_col)
+                    if prev_id == 'C':
+                        result[col] = 'D'
+                        print(f"  🔧 숫자 ID 보정: Col_{col} '0' → 'D' (C 다음)")
+                    elif prev_id == 'N':
+                        result[col] = 'O'
+                        print(f"  🔧 숫자 ID 보정: Col_{col} '0' → 'O' (N 다음)")
+            
+            elif exp_id == '1':
+                result[col] = 'I'
+                print(f"  🔧 숫자 ID 보정: Col_{col} '1' → 'I'")
+        
+        # ========== 2단계: 누락된 ID 추론 ==========
         for i, col in enumerate(sorted_cols):
+            # 🔧 먼저 정의
+            prev_id = None
+            next_id = None
+            
             # 이미 ID가 있으면 건너뛰기
             if col in result and result[col]:
                 continue
             
-            # 이전/다음 컬럼의 ID 확인
-            prev_id = None
-            next_id = None
-            
-            # 이전 컬럼
+            # 이전 컬럼 ID 찾기
             if i > 0:
                 prev_col = sorted_cols[i-1]
                 if prev_col in result and result[prev_col]:
                     prev_id = result[prev_col]
             
-            # 다음 컬럼
+            # 다음 컬럼 ID 찾기
             if i < len(sorted_cols) - 1:
                 next_col = sorted_cols[i+1]
                 if next_col in result and result[next_col]:
                     next_id = result[next_col]
             
-            # 추론
+            # 디버깅 로그
+            print(f"  Col_{col} 추론:")
+            print(f"    이전: Col_{sorted_cols[i-1] if i > 0 else 'N/A'} = {prev_id}")
+            print(f"    다음: Col_{sorted_cols[i+1] if i < len(sorted_cols)-1 else 'N/A'} = {next_id}")
+            
+            # 🆕 추론 로직 (순차 우선)
             inferred_id = None
             
-            # 이전 알파벳이 있는 경우
+            # 이전 알파벳이 있는 경우 → 다음 알파벳
             if prev_id and len(prev_id) == 1 and prev_id.isalpha():
                 prev_idx = alphabet.index(prev_id)
                 inferred_id = alphabet[(prev_idx + 1) % 26]
+                print(f"    💡 이전 ID 기반 추론: {prev_id} → {inferred_id}")
                 
-                # 다음 ID와 비교하여 검증
+                # 🆕 다음 ID와 검증
                 if next_id and len(next_id) == 1 and next_id.isalpha():
                     next_idx = alphabet.index(next_id)
                     expected_idx = alphabet.index(inferred_id)
                     
-                    # 순서가 맞지 않으면 fallback
-                    if expected_idx >= next_idx:
+                    # 순서가 맞는지 확인
+                    if expected_idx < next_idx or expected_idx == next_idx - 1:
+                        print(f"    ✅ 순서 검증 통과: {inferred_id} < {next_id}")
+                    else:
+                        print(f"    ⚠️ 순서 불일치: {inferred_id} >= {next_id}")
                         inferred_id = f'Col_{col}'
             
-            # 다음 알파벳만 있는 경우
+            # 다음 알파벳만 있는 경우 → 이전 알파벳
             elif next_id and len(next_id) == 1 and next_id.isalpha():
                 next_idx = alphabet.index(next_id)
                 inferred_id = alphabet[(next_idx - 1) % 26]
+                print(f"    💡 다음 ID 기반 추론: {next_id} → {inferred_id}")
             
             # 둘 다 없으면 fallback
             else:
                 inferred_id = f'Col_{col}'
+                print(f"    ⚠️ 추론 불가 → fallback")
             
             result[col] = inferred_id
-            print(f"  ℹ️ Col_{col} 실험 ID 추론: '{inferred_id}' (이전: {prev_id}, 다음: {next_id})")
-        
+            print(f"    → 최종: '{inferred_id}'")
+
         return result
         
     def _get_experiment_ids(self, table_matrix: Dict, exp_id_row: int, experiment_cols: List[int]) -> List[str]:
@@ -966,13 +1321,24 @@ class KolmarCosmeticOCR:
                 table_matrix[row_idx] = {}
             table_matrix[row_idx][col_idx] = cell.content.strip()
         
+            # ✅ 추가: 테이블 매트릭스 샘플 출력
+        print("\n📊 테이블 매트릭스 샘플 (처음 5행):")
+        for row_idx in range(min(5, len(table_matrix))):
+            if row_idx in table_matrix:
+                row_preview = {}
+                for col_idx in sorted(table_matrix[row_idx].keys())[:8]:  # 처음 8개 컬럼만
+                    value = table_matrix[row_idx][col_idx]
+                    display_value = value[:20] if len(value) > 20 else value
+                    row_preview[f"Col_{col_idx}"] = display_value
+                print(f"  행 {row_idx}: {row_preview}")
+            
         main_header_row, exp_id_row = self._find_header_rows(table_matrix)
         table_matrix = self._align_raw_materials_header(table_matrix, main_header_row)
         
         # 🎯 추가: RAW MATERIALS 헤더 정렬 전처리
         table_matrix = self._align_raw_materials_header(table_matrix, main_header_row)
         
-        column_info = self._identify_columns(table_matrix, main_header_row)
+        column_info = self._identify_columns(table_matrix, main_header_row, exp_id_row)
         
         if not column_info:
             return {'ingredients': [], 'experiment_columns': []}
@@ -1060,7 +1426,13 @@ class KolmarCosmeticOCR:
                 exp_value = ''
                 
                 if exp_col in row_data:
-                    exp_value = self._clean_checkbox_and_newline(row_data[exp_col])
+                    raw_value = row_data[exp_col]
+                    
+                    # 1단계: 체크박스 제거
+                    exp_value = self._clean_checkbox_and_newline(raw_value)
+                    
+                    # 🆕 2단계: 정규화 (쉼표/콜론 → 점)
+                    exp_value = self._normalize_experiment_value(exp_value)
                 
                 ingredient[exp_id] = exp_value
             

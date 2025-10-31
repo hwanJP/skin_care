@@ -34,7 +34,7 @@ from backend_recipe import (              # 🆕 제형 레시피 전용
 # ✅ 동일: 페이지 설정
 # ========================================
 st.set_page_config(
-    page_title="제형 레시피 OCR 도구",  # 🔧 제목만 변경
+    page_title="한국콜마 실험 처방 READER",  # 🔧 제목만 변경
     layout="wide",
     initial_sidebar_state="collapsed"
 )
@@ -153,17 +153,24 @@ def save_current_page():
 st.markdown("""
 <style>
     .compact-header {
-        background: linear-gradient(90deg, #0066cc 0%, #0099ff 100%);
+        background: linear-gradient(90deg, #0066cc 0%, #0099ff 100%) !important;
         padding: 0.5rem 1rem;
         border-radius: 5px;
-        color: white;
+        color: white !important;  /* !important 추가 */
         margin-bottom: 1rem;
     }
     .status-bar {
-        background-color: #f0f2f6;
+        background-color: #f0f2f6 !important;
         padding: 0.5rem;
         border-radius: 5px;
         margin: 0.5rem 0;
+        color: #000000 !important;  /* 텍스트 색 명시 */
+    }
+    
+    /* 다크 모드 대응 */
+    [data-testid="stAppViewContainer"] .compact-header {
+        background: linear-gradient(90deg, #0066cc 0%, #0099ff 100%) !important;
+        color: white !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -173,7 +180,7 @@ st.markdown("""
 # ========================================
 st.markdown("""
 <div class="compact-header">
-    <h1>제형 레시피 OCR 도구</h1>
+    <h1>한국콜마 실험 처방 READER</h1>
     <p>Azure Document Intelligence 기반 PDF to Excel 자동 변환</p>
 </div>
 """, unsafe_allow_html=True)
@@ -442,7 +449,7 @@ if current_file:
                     use_container_width=True
                 )
         else:
-            st.button("📥 Excel 다운로드", use_container_width=True, disabled=True)
+            st.button("Excel 다운로드", use_container_width=True, disabled=True)
     
     # ========================================
     # ✅ 상태 표시줄

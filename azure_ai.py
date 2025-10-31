@@ -397,9 +397,10 @@ class KolmarCosmeticOCR:
                         next_value = next_cell.content.strip()
                         
                         # 🔧 수정: 불필요한 텍스트 필터링 강화
-                        if next_value and next_value not in ['DATE', 'Date', 'NO', 'No', '/', '']:
+                        if next_value and next_value not in ['DATE', 'Date', 'NO', 'No', '/', '', 'Data/', 'DATA/']:
                             # Date, No 단어 제거
                             next_value = re.sub(r'\s*Date\s*/?\s*', '', next_value, flags=re.IGNORECASE)
+                            next_value = re.sub(r'\s*Data\s*/?\s*', '', next_value, flags=re.IGNORECASE)  # 🆕 추가
                             next_value = re.sub(r'\s*No\s*/?\s*$', '', next_value, flags=re.IGNORECASE)
                             next_value = next_value.strip()
                             
@@ -447,6 +448,54 @@ class KolmarCosmeticOCR:
         for idx, tbl in enumerate(result.tables):
             print(f"  테이블 {idx}: {tbl.row_count}행 x {tbl.column_count}열")
         
+        # 🆕 추가 1: 제형 테이블 상단 확인
+        if len(result.tables) >= 2:
+            large_idx = 1 if len(result.tables) == 2 else max(range(len(result.tables)), 
+                                                                key=lambda i: result.tables[i].row_count * result.tables[i].column_count)
+            table = result.tables[large_idx]
+            
+            print(f"\n🔍 제형 테이블(테이블 {large_idx}) 상단 10행 상세:")
+            cells_by_row = {}
+            for cell in table.cells:
+                if cell.row_index < 10:
+                    row_idx = cell.row_index
+                    if row_idx not in cells_by_row:
+                        cells_by_row[row_idx] = []
+                    cells_by_row[row_idx].append((cell.column_index, cell.content.strip()))
+            
+            for row_idx in sorted(cells_by_row.keys()):
+                row_content = ' | '.join([f"[{col}]{content[:30]}" for col, content in sorted(cells_by_row[row_idx])])
+                print(f"  행 {row_idx}: {row_content}")
+        
+        # 🆕 추가 2: 전체 텍스트 키워드 검색
+        print(f"\n🔍 전체 문서 텍스트에서 키워드 검색:")
+        full_text = result.content
+        
+        # 처방특성 찾기
+        if '처방특성' in full_text:
+            idx = full_text.find('처방특성')
+            context = full_text[max(0, idx-20):min(len(full_text), idx+100)]
+            print(f"  ✅ '처방특성' 발견:")
+            print(f"     {context}")
+        else:
+            print(f"  ❌ '처방특성' 단어 없음")
+        
+        # 키워드 찾기
+        keywords = ['캡슐', '안정화', '투명', '앰플', '에센스', '가용화']
+        found_any = False
+        for keyword in keywords:
+            if keyword in full_text:
+                idx = full_text.find(keyword)
+                context = full_text[max(0, idx-20):min(len(full_text), idx+50)]
+                print(f"  ✅ '{keyword}' 발견: {context}")
+                found_any = True
+                break
+        
+        if not found_any:
+            print(f"  ❌ 키워드 없음")
+        
+        print("\n" + "="*80)
+        
         # ========== 메타데이터 추출: 3단계 전략 ==========
         document_info = {
             'formula_number': '',
@@ -489,6 +538,34 @@ class KolmarCosmeticOCR:
                     document_info['characteristics'] = formula_header_info['characteristics']
                     print(f"  🔄 처방특성 (제형 테이블): '{document_info['characteristics']}'")
             
+            # 🆕 추가 3: 처방특성이 여전히 없으면 전체 텍스트에서 추출
+            if not document_info['characteristics']:
+                print(f"\n⚠️ 처방특성 여전히 없음, 전체 텍스트에서 재시도")
+                
+                # 패턴 1: "처방특성: XXX"
+                match = re.search(r'처방특성[:\s]*([가-힣\s\w()]+?)(?:\n|$|Formula|WE\d{4})', full_text)
+                if match:
+                    document_info['characteristics'] = match.group(1).strip()
+                    print(f"  ✅ 처방특성 발견 (패턴1): '{document_info['characteristics']}'")
+                else:
+                    # 패턴 2: 키워드 직접 찾기
+                    for keyword in ['캡슐', '안정화', '투명', '불투명', '에멀젼', '가용화']:
+                        if keyword in full_text:
+                            # 키워드 주변 50자 추출
+                            idx = full_text.find(keyword)
+                            context = full_text[max(0, idx-10):min(len(full_text), idx+40)]
+                            
+                            # 한 줄로 정리
+                            context = context.replace('\n', ' ').strip()
+                            
+                            # 너무 길면 자르기
+                            if len(context) > 50:
+                                context = context[:50]
+                            
+                            document_info['characteristics'] = context
+                            print(f"  ✅ 처방특성 발견 (패턴2): '{context}'")
+                            break
+            
             # 3단계: 전체 텍스트 fallback
             if not document_info['formula_number'] or not document_info['product_name']:
                 print(f"\n⚠️ 여전히 정보 부족, 전체 텍스트에서 재시도")
@@ -511,11 +588,12 @@ class KolmarCosmeticOCR:
             document_info = self._extract_document_info(full_text)
             table = result.tables[0]
         
-        print(f"📋 문서번호: {document_info.get('formula_number', 'Unknown')}")
+        print(f"\n📋 문서번호: {document_info.get('formula_number', 'Unknown')}")
         print(f"📦 제품명: {document_info.get('product_name', 'Unknown')}")
+        print(f"🔬 처방특성: {document_info.get('characteristics', 'Unknown')}")
         
         if not result.tables:
-            print("❌ 테이블을 찾을 수 없습니다.")
+            print("❌테이블을 찾을 수 없습니다.")
             return {}
         
         print(f"✅ 제형 테이블 선택: {table.row_count}행 x {table.column_count}열")
@@ -546,7 +624,7 @@ class KolmarCosmeticOCR:
         # 처음 5행만 확인
         cells_by_row = {}
         for cell in table.cells:
-            if cell.row_index < 5:  # 처음 5행만
+            if cell.row_index < 10:  # 처음 5행만
                 row_idx = cell.row_index
                 if row_idx not in cells_by_row:
                     cells_by_row[row_idx] = {}
@@ -575,7 +653,7 @@ class KolmarCosmeticOCR:
                         info['product_name'] = ' '.join(values)
                         print(f"  ✅ 제품명 발견: '{info['product_name']}' (행{row_idx})")
                 
-                # 처방특성 찾기
+                # 처방특성 찾기 (라벨 기반)
                 if '처방특성' in content or ('처방' in content and '특성' in content):
                     # 같은 행의 다음 셀들 병합
                     values = []
@@ -586,7 +664,7 @@ class KolmarCosmeticOCR:
                     
                     if values:
                         info['characteristics'] = ' '.join(values)
-                        print(f"  ✅ 처방특성 발견: '{info['characteristics']}' (행{row_idx})")
+                        print(f"  ✅ 처방특성 발견: '{info['characteristics']}' (행{row_idx}, 라벨)")
                 
                 # Formula No 찾기
                 if 'formula' in content_lower or 'WE' in content.upper():
@@ -594,6 +672,29 @@ class KolmarCosmeticOCR:
                     if match:
                         info['formula_number'] = match.group()
                         print(f"  ✅ 문서번호 발견: '{info['formula_number']}' (행{row_idx})")
+        
+        # 🔥 추가: 처방특성이 없으면 키워드로 찾기
+        if not info['characteristics']:
+            print(f"  ℹ️ 처방특성 라벨 없음, 키워드로 재검색...")
+            
+            # 처방특성 키워드
+            keywords = ['캡슐', '안정화', '투명', '불투명', '에멀젼', '크림', '로션', 
+                    '젤', '세럼', '앰플', '에센스', '토너', '미스트', '가용화']
+            
+            for row_idx in sorted(cells_by_row.keys()):
+                row_data = cells_by_row[row_idx]
+                
+                for col_idx, content in row_data.items():
+                    # 키워드가 포함되고, 적당한 길이면 처방특성으로 판단
+                    if any(k in content for k in keywords) and 5 <= len(content) <= 50:
+                        # 라벨이 아닌 값인지 확인 (라벨에는 '특성', '제형' 등이 있음)
+                        if '처방특성' not in content and '제형특성' not in content:
+                            info['characteristics'] = content
+                            print(f"  ✅ 처방특성 발견: '{content}' (행{row_idx}, 키워드)")
+                            break
+                
+                if info['characteristics']:
+                    break
         
         return info
 
@@ -889,7 +990,6 @@ class KolmarCosmeticOCR:
         code_col = None
         name_col = None
         
-        # 🔧 수정: exp_id_row를 파라미터로 받음
         if exp_id_row is None:
             exp_id_row = header_row + 1
         
@@ -929,6 +1029,20 @@ class KolmarCosmeticOCR:
                         print(f"    ✅ Phase 컬럼 발견: Col_{col_idx} (이전 행)")
                         break
         
+        # 🆕 Name도 이전 행에서 찾기
+        if name_col is None:
+            prev_row_idx = header_row - 1
+            if prev_row_idx >= 0 and prev_row_idx in table_matrix:
+                prev_row_data = table_matrix[prev_row_idx]
+                print(f"\n  ℹ️ Name을 이전 행 {prev_row_idx}에서 검색:")
+                
+                for col_idx, value in prev_row_data.items():
+                    value_upper = str(value).upper().strip()
+                    if any(k in value_upper for k in ['MATERIAL', '원료', 'RAW', '원료명', 'NAME']):
+                        name_col = col_idx
+                        print(f"    ✅ Name 컬럼 발견: Col_{col_idx} (이전 행)")
+                        break
+        
         print(f"\n📋 기본 컬럼 - Phase: {phase_col}, Code: {code_col}, Name: {name_col}")
         
         # 기본 컬럼이 없으면 기본값 설정
@@ -943,8 +1057,9 @@ class KolmarCosmeticOCR:
                 code_col = 1
                 print(f"   Code를 Col_1로 가정")
             if name_col is None:
-                name_col = 2
-                print(f"   Name를 Col_2로 가정")
+                # 🔥 수정: Code 다음 컬럼을 Name으로 가정 (더 정확)
+                name_col = code_col + 1
+                print(f"   Name를 Col_{name_col}로 가정 (Code 다음)")
         
         # 🎯 실험 컬럼 찾기
         max_col = 0
